@@ -1,0 +1,286 @@
+<!doctype html>
+<!--
+Copyright 2018 The Immersive Web Community Group
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-->
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+    <meta name='mobile-web-app-capable' content='yes'>
+    <meta name='apple-mobile-web-app-capable' content='yes'>
+    <link rel='icon' type='image/png' sizes='622x380' href='LOGO.jpg'>
+    <link rel='stylesheet' href='css/common.css'>
+    <title>Physics Classroom</title>
+  </head>
+  <body>
+    <header>
+      <details open>
+        <summary>Immersive VR Session</summary>
+        <p>
+          This sample demonstrates a board portraying the kinematics of a bar on a desk.
+          <a class="back" href="./">Back</a>
+        </p>
+      </details>
+    </header>
+    <main style='text-align: center;'>
+    </main>
+  <div id ="tablelist"><h>Select a table:</h>
+    <select id='availabletablelist' style="position: relative; width:100%; overflow-x:auto">
+    </select>
+  </div>
+    <script type="module">
+      import {WebXRButton} from './js/util/webxr-button.js';
+      import {Scene} from './js/render/scenes/scene.js';
+      import {Renderer, createWebGLContext} from './js/render/core/renderer.js';
+      import {UrlTexture, DataTexture} from './js/render/core/texture.js';
+      import {ButtonNode} from './js/render/nodes/button.js';
+      import {ImageNode} from './js/render/nodes/image.js';
+      import {Gltf2Node} from './js/render/nodes/gltf2.js';
+      import {SkyboxNode} from './js/render/nodes/skybox.js';
+      import {BoardViewer} from './js/render/nodes/board.js'
+      import {QueryArgs} from './js/util/query-args.js';
+
+
+      // If requested, use the polyfill to provide support for mobile devices
+      // and devices which only support WebVR.
+      import WebXRPolyfill from './js/third-party/webxr-polyfill/build/webxr-polyfill.module.js';
+      if (QueryArgs.getBool('usePolyfill', true)) {
+        let polyfill = new WebXRPolyfill();
+      }
+
+      let seat = null;
+      let tableId = null;
+      let startTime = Date.now();
+      //The seat adjustment would be different for different seats on the table.
+      let seatAdjustment = {'one':0.5};
+      
+      let seats = {
+      'one':  {'Translation':[0.0,0.0,9.0],'projection':[]},  
+      'two':  {'Translation':[-8.0,0.0,9.0],'projection':[]}, 
+      'three':{'Translation':[8.0,0.0,9.0],'projection':[]}  ,  
+      'four': {'Translation':[0.0,0.0,-1.0],'projection':[]} ,
+      'five': {'Translation':[-8.0,0.0,-1.0],'projection':[]},
+      'six':  {'Translation':[8.0,0.0,-1.0],'projection':[]} ,
+      'seven':{'Translation':[0.0,0.0,-11.0],'projection':[]},
+      'eight':{'Translation':[-8.0,0.0,-11.0],'projection':[]},
+      'nine': {'Translation':[8.0,0.0,-11.0],'projection':[]} 
+      }
+
+      // XR globals.
+      let xrButton = null;
+      let xrRefSpace = null;
+
+      // WebGL scene globals.
+      let gl = null;
+      let renderer = null;
+      let scene = new Scene();
+
+      scene.addNode(new Gltf2Node({url: 'media/gltf/classroom/classroom.gltf'}));
+      let board = new BoardViewer();
+      board.selectable = true;
+      board.translation = [-0.1,3.45,-14.9];
+      board.scale = [6.0, 4.0, 1.0];
+      scene.addNode(board);
+      // I will move this to the classroom folder potentially. 
+      let carNode = new Gltf2Node({url: 'media/gltf/classroom/cube.gltf'});
+      scene.addNode(carNode);
+
+      var select  = document.getElementById('availabletablelist');
+      select.length = 0;
+      let index = 0;
+      let Tables = ['one','two','three','four','five','six','seven','eight','nine'];
+      Tables.forEach(table =>    
+      {
+        select.length += 1;	
+        select.children[index].text += table;
+        index +=1;	
+      })
+
+      // Checks to see if WebXR is available and, if so, queries a list of
+      // XRDevices that are connected to the system.
+      function initXR() {
+        // Adds a helper button to the page that indicates if any XRDevices are
+        // available and let's the user pick between them if there's multiple.
+        xrButton = new WebXRButton({
+          onRequestSession: onRequestSession,
+          onEndSession: onEndSession
+        });
+
+        // Is WebXR available on this UA?
+        if (navigator.xr) {
+          document.querySelector('body').appendChild(xrButton.domElement);
+          // If the device allows creation of exclusive sessions set it as the
+          // target of the 'Enter XR' button.
+          navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+            xrButton.enabled = supported;
+          });
+        }
+      }
+
+      // Called when the user selects a device to present to. In response we
+      // will request an exclusive session from that device.
+      function onRequestSession() {     
+        return navigator.xr.requestSession('immersive-vr').then(onSessionStarted);
+        }
+
+      // Called when we've successfully acquired a XRSession. In response we
+      // will set up the necessary session state and kick off the frame loop.
+      function onSessionStarted(session) {
+        tableId = Tables[select.selectedIndex]; 
+        seat = seats[tableId].Translation;
+
+        // This informs the 'Enter XR' button that the session has started and
+        // that it should display 'Exit XR' instead.
+        xrButton.setSession(session);
+
+        // Listen for the sessions 'end' event so we can respond if the user
+        // or UA ends the session for any reason.
+        session.addEventListener('end', onSessionEnded);
+
+        // Create a WebGL context to render with, initialized to be compatible
+        // with the XRDisplay we're presenting to.
+        gl = createWebGLContext({
+          xrCompatible: true
+        });
+
+        // Create a renderer with that GL context (this is just for the samples
+        // framework and has nothing to do with WebXR specifically.)
+        renderer = new Renderer(gl);
+
+        // Set the scene's renderer, which creates the necessary GPU resources.
+        scene.setRenderer(renderer);
+
+        // Use the new WebGL context to create a XRWebGLLayer and set it as the
+        // sessions baseLayer. This allows any content rendered to the layer to
+        // be displayed on the XRDevice.
+        session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+        // Get a frame of reference, which is required for querying poses. In
+        // this case an 'local' frame of reference means that all poses will
+        // be relative to the location where the XRDevice was first detected.
+        session.requestReferenceSpace('local').then((refSpace) => {
+          xrRefSpace = refSpace;
+          xrRefSpace = xrRefSpace
+          .getOffsetReferenceSpace(
+            new XRRigidTransform( {x:seat[0], y:seat[1], z:(seat[2]-1),w:1.0}, {x:0.0, y:0.0, z:0.0, w:1.0} ));
+          // Inform the session that we're ready to begin drawing.
+          session.requestAnimationFrame(onXRFrame);
+        });
+      }
+
+      // Called when the user clicks the 'Exit XR' button. In response we end
+      // the session.
+      function onEndSession(session) {
+        session.end();
+      }
+
+      // Called either when the user has explicitly ended the session (like in
+      // onEndSession()) or when the UA has ended the session for any reason.
+      // At this point the session object is no longer usable and should be
+      // discarded.
+      function onSessionEnded(event) {
+        xrButton.setSession(null);
+        // In this simple case discard the WebGL context too, since we're not
+        // rendering anything else to the screen with it.
+        renderer = null;
+      }
+
+      // Called every time the XRSession requests that a new frame be drawn.
+      function onXRFrame(t, frame) {
+        let session = frame.session;
+
+        if ((Date.now()-startTime) > 2800000)
+          {
+            alert("Your session has ended please refresh the page to start a new one!")
+            onEndSession(session);
+          } 
+
+        carNode.translation = [-seat[0] + seatAdjustment['one'] + (-board.getDisplacement() % -1.25), seat[1]-0.375/2, 0.2-seat[2]];
+
+        // Per-frame scene setup. Nothing WebXR specific here.
+        scene.startFrame();
+
+        // Inform the session that we're ready for the next frame.
+        session.requestAnimationFrame(onXRFrame);
+
+        // Get the XRDevice pose relative to the Frame of Reference we created
+        // earlier.
+        let pose = frame.getViewerPose(xrRefSpace);
+
+        // Getting the pose may fail if, for example, tracking is lost. So we
+        // have to check to make sure that we got a valid pose before attempting
+        // to render with it. If not in this case we'll just leave the
+        // framebuffer cleared, so tracking loss means the scene will simply
+        // disappear.
+        if (pose) {
+          let glLayer = session.renderState.baseLayer;
+
+          // If we do have a valid pose, bind the WebGL layer's framebuffer,
+          // which is where any content to be displayed on the XRDevice must be
+          // rendered.
+          gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+
+          // Clear the framebuffer
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+          // Loop through each of the views reported by the frame and draw them
+          // into the corresponding viewport.
+          for (let view of pose.views) {
+            let viewport = glLayer.getViewport(view);
+            gl.viewport(viewport.x, viewport.y,
+                        viewport.width, viewport.height);
+
+
+
+            // Draw this view of the scene. What happens in this function really
+            // isn't all that important. What is important is that it renders
+            // into the XRWebGLLayer's framebuffer, using the viewport into that
+            // framebuffer reported by the current view, and using the
+            // projection matrix and view transform from the current view.
+            // We bound the framebuffer and viewport up above, and are passing
+            // in the appropriate matrices here to be used when rendering. 
+            scene.draw(view.projectionMatrix, view.transform);
+          }
+        } else {
+          // There's several options for handling cases where no pose is given.
+          // The simplest, which these samples opt for, is to simply not draw
+          // anything. That way the device will continue to show the last frame
+          // drawn, possibly even with reprojection. Alternately you could
+          // re-draw the scene again with the last known good pose (which is now
+          // likely to be wrong), clear to black, or draw a head-locked message
+          // for the user indicating that they should try to get back to an area
+          // with better tracking. In all cases it's possible that the device
+          // may override what is drawn here to show the user it's own error
+          // message, so it should not be anything critical to the application's
+          // use.
+        }
+
+        // Per-frame scene teardown. Nothing WebXR specific here.
+        scene.endFrame();
+
+        //Update Board Values
+        board.update();
+      }
+
+      // Start the XR application.
+      initXR();
+    </script>
+  </body>
+</html>
